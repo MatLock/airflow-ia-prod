@@ -138,6 +138,15 @@ model = mlflow.sklearn.load_model("models:/rf_prod_pet@production")
 predictions = model.predict(X_new)
 ```
 
+### 7. Model production model metadata
+```python
+  client = MlflowClient()
+  # Get metadata
+  mv = client.get_model_version_by_alias("rf_prod_pet", "production")
+  run = client.get_run(mv.run_id)                                                                                                                                               
+  table_name = run.data.params["feature_store_table"]
+```
+
 ### Rerunning the pipeline
 
 Each time you trigger `ingest_dag`, a new feature store version is created (`v1`, `v2`, `v3`, ...) and new models are trained against the latest data. The best model is re-evaluated and the `production` alias is updated if a better model is found.

@@ -2,4 +2,7 @@
 logs/*
 !logs/.gitkeep
 .venv
- dags/__pycache__/*
+dags/__pycache__/*
+dags/__pycache__
+mlruns/*
+mlflow.db

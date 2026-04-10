@@ -6,6 +6,7 @@ from airflow.sdk import dag, task
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
+from mlflow.tracking import MlflowClient
 import pandas as pd
 import mlflow
 import mlflow.sklearn
@@ -25,6 +26,7 @@ FEATURE_COLS = [
     "last_prod_pet",
     "n_readings",
 ]
+EXPERIMENT_ID = 'energy_experiment'
 
 
 @task
@@ -46,6 +48,7 @@ def train_with_online_feature_store():
   y = df[TARGET]
   X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+  mlflow.set_experiment(EXPERIMENT_ID)
   for n_estimators in [25, 50, 100]:
     with mlflow.start_run(run_name=f"rf_{TARGET}_n{n_estimators}"):
       model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
@@ -63,16 +66,36 @@ def train_with_online_feature_store():
       mlflow.log_metric("mae", mae)
       mlflow.log_metric("mse", mse)
       mlflow.log_metric("r2", r2)
-      mlflow.sklearn.log_model(model, artifact_path=f"rf_{TARGET}_n{n_estimators}")
+      mlflow.sklearn.log_model(model, name=f"rf_{TARGET}_n{n_estimators}")
       logging.info(f"rf_n{n_estimators} — MAE: {mae:.4f}, MSE: {mse:.4f}, R2: {r2:.4f}")
 
+@task
+def promote_best_model():
+  client = MlflowClient()
+  experiment = client.get_experiment_by_name(EXPERIMENT_ID)
+  runs = client.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    order_by=["metrics.mse ASC"],
+    max_results=1,
+  )
+  best_run = runs[0]
+  run_id = best_run.info.run_id
+  mse = best_run.data.metrics["mse"]
+  logging.info(f"Best run: {run_id} with MSE: {mse:.4f}")
+  logging.info(f"Registering model with run id: {run_id}")
+  model_uri = f"runs:/{run_id}/rf_{TARGET}_n{best_run.data.params['n_estimators']}"
+  model_name = f"rf_{TARGET}"
+  mv = mlflow.register_model(model_uri, model_name)
+  logging.info(f"Tagging model as productional. model: {model_name}")
+  client.set_registered_model_alias(model_name, "production", mv.version)
+  logging.info(f"Registered {model_name} version {mv.version} as 'productional'")
 
 @dag(
-    dag_id='train_with_online_feature_store',
+    dag_id='train_with_online_feature_store_and_promote_best_model',
     description='Train RF models using the latest online feature store',
     schedule=None,
 )
-def train_dag():
-  train_with_online_feature_store()
+def train_and_promote_dag():
+  train_with_online_feature_store() >> promote_best_model()
 
-train_dag()
+train_and_promote_dag()

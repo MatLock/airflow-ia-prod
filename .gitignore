@@ -2,4 +2,4 @@
 logs/*
 !logs/.gitkeep
 .venv
- dags/__pycache__/
+ dags/__pycache__/*

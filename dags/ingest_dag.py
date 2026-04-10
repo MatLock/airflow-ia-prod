@@ -1,6 +1,7 @@
 import os
 
 from airflow.sdk import dag, task
+from airflow.api.client.local_client import Client
 from sklearn.preprocessing import LabelEncoder
 from sqlalchemy import create_engine, text
 
@@ -111,12 +112,19 @@ def delete_raw_data():
   logging.info("Raw data cleanup complete")
 
 
+@task
+def trigger_train_dag():
+  client = Client(None, None)
+  client.trigger_dag('train_with_online_feature_store')
+  logging.info("Triggered train_with_online_feature_store DAG")
+
+
 @dag(
     dag_id='ingest_dag',
     description='Ingestion into online Store DAG',
     schedule=None,
 )
 def ingest_dag():
-  download_dataset() >> preprocess() >> insert_into_online_store() >> delete_raw_data()
+  download_dataset() >> preprocess() >> insert_into_online_store() >> delete_raw_data() >> trigger_train_dag()
 
 ingest_dag()

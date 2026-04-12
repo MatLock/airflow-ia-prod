@@ -1,12 +1,13 @@
 import os
 import logging
 from datetime import date
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import mlflow
 import mlflow.sklearn
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from mlflow.tracking import MlflowClient
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
@@ -31,6 +32,24 @@ FEATURE_COLS = [
 ]
 
 # Pydantic models
+class ModelMetrics(BaseModel):
+    mae: Optional[float]
+    mse: Optional[float]
+    r2: Optional[float]
+
+
+class ModelMetadataResponse(BaseModel):
+    model_name: str
+    model_version: str
+    alias: str
+    run_id: str
+    feature_store_version: Optional[str]
+    feature_store_table: Optional[str]
+    target: Optional[str]
+    n_estimators: Optional[int]
+    metrics: ModelMetrics
+
+
 class ForecastPoint(BaseModel):
     date: date
     prod: float
@@ -54,6 +73,7 @@ app = FastAPI(
 
 _engine = None
 _model = None
+_model_metadata: Optional[Dict[str, Any]] = None
 
 
 def get_engine():
@@ -64,13 +84,32 @@ def get_engine():
 
 
 def get_model():
-    """Load the production model from MLflow on first call and cache it."""
-    global _model
+    """Load the production model and its metadata from MLflow on first call and cache both."""
+    global _model, _model_metadata
     if _model is None:
         logger.info(f"Loading model models:/{MODEL_NAME}@{MODEL_ALIAS} from MLflow...")
         try:
+            client = MlflowClient()
+            mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+            run = client.get_run(mv.run_id)
+
             _model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
-            logger.info("Model loaded successfully")
+            _model_metadata = {
+                "model_name": MODEL_NAME,
+                "model_version": mv.version,
+                "alias": MODEL_ALIAS,
+                "run_id": mv.run_id,
+                "feature_store_version": run.data.params.get("feature_store_version"),
+                "feature_store_table": run.data.params.get("feature_store_table"),
+                "target": run.data.params.get("target"),
+                "n_estimators": int(run.data.params.get("n_estimators", 0)),
+                "metrics": {
+                    "mae": run.data.metrics.get("mae"),
+                    "mse": run.data.metrics.get("mse"),
+                    "r2": run.data.metrics.get("r2"),
+                },
+            }
+            logger.info(f"Model loaded: version={mv.version} run_id={mv.run_id}")
         except Exception as exc:
             logger.error(f"Failed to load model: {exc}")
             raise HTTPException(
@@ -96,6 +135,30 @@ def get_latest_fs_table() -> str:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/model", response_model=ModelMetadataResponse)
+def get_model_metadata():
+    """
+    Return metadata of the current production model.
+
+    Exposes which feature store version was used for training, the MLflow run ID
+    for full reproducibility, and the evaluation metrics that determined promotion.
+    """
+    get_model()  # ensures _model_metadata is populated
+    if _model_metadata is None:
+        raise HTTPException(status_code=503, detail="Model metadata not available")
+    return ModelMetadataResponse(
+        model_name=_model_metadata["model_name"],
+        model_version=str(_model_metadata["model_version"]),
+        alias=_model_metadata["alias"],
+        run_id=_model_metadata["run_id"],
+        feature_store_version=_model_metadata.get("feature_store_version"),
+        feature_store_table=_model_metadata.get("feature_store_table"),
+        target=_model_metadata.get("target"),
+        n_estimators=_model_metadata.get("n_estimators"),
+        metrics=ModelMetrics(**_model_metadata["metrics"]),
+    )
 
 
 @app.get("/api/v1/wells", response_model=List[WellItem])

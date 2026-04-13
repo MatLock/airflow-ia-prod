@@ -62,7 +62,7 @@ x-airflow-common:
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_ISSUER: 'airflow-local'
@@ -190,6 +190,7 @@ services:
       # Required to handle warm shutdown of the celery workers properly
       # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
       DUMB_INIT_SETSID: "0"
+      AIRFLOW__CELERY__WORKER_CONCURRENCY: "2"
     restart: always
     depends_on:
       <<: *airflow-common-depends-on
@@ -374,6 +375,22 @@ services:
       interval: 10s
       retries: 5
       start_period: 30s
+    restart: always
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ${ENV_FILE_PATH:-.env}
+    environment:
+      MLFLOW_TRACKING_URI: 'http://mlflow:9090'
+      MYSQL_HOST: mysql
+    volumes:
+      - ./mlruns:/mlflow/mlruns
+    depends_on:
+      mysql:
+        condition: service_healthy
     restart: always
 
 volumes:

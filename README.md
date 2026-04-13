@@ -5,7 +5,7 @@ End-to-end ML pipeline that ingests Argentina's unconventional oil & gas well pr
 ## Architecture
 
 ```
-Data Source (API) -> Airflow (Ingest DAG) -> MySQL Feature Store -> Airflow (Train DAG) -> MLflow Model Registry
+Data Source (API) -> Airflow (Ingest DAG) -> MySQL Feature Store -> Airflow (Train DAG) -> MLflow Model Registry -> Forecast API
 ```
 
 ### Services
@@ -14,6 +14,7 @@ Data Source (API) -> Airflow (Ingest DAG) -> MySQL Feature Store -> Airflow (Tra
 |---------|------|-------------|
 | Airflow UI | 8080 | DAG orchestration and monitoring |
 | MLflow UI | 9191 | Experiment tracking and model registry |
+| Forecast API | 8000 | REST API for wells and production forecasts |
 | MySQL | 3307 | Versioned feature store |
 | PostgreSQL | 5432 | Airflow metadata database |
 | Redis | 6379 | Celery broker |
@@ -138,13 +139,100 @@ model = mlflow.sklearn.load_model("models:/rf_prod_pet@production")
 predictions = model.predict(X_new)
 ```
 
-### 7. Model production model metadata
+### 7. Query model production metadata
+
+To inspect which model is currently in production and trace it back to its training run:
+
 ```python
-  client = MlflowClient()
-  # Get metadata
-  mv = client.get_model_version_by_alias("rf_prod_pet", "production")
-  run = client.get_run(mv.run_id)                                                                                                                                               
-  table_name = run.data.params["feature_store_table"]
+from mlflow.tracking import MlflowClient
+
+client = MlflowClient()
+mv = client.get_model_version_by_alias("rf_prod_pet", "production")
+run = client.get_run(mv.run_id)
+
+print("Model version :", mv.version)
+print("Run ID        :", mv.run_id)
+print("Feature table :", run.data.params["feature_store_table"])
+print("n_estimators  :", run.data.params["n_estimators"])
+print("MSE           :", run.data.metrics["mse"])
+print("R2            :", run.data.metrics["r2"])
+```
+
+This allows you to reproduce any past model training by pairing the run ID with the exact feature store version used.
+
+### 8. Use the Forecast API
+
+The API is available at [http://localhost:8000](http://localhost:8000) once the stack is running. Interactive docs (Swagger UI) are at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+> **Note:** The API requires the ingest and training pipelines to have run at least once before serving forecasts.
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Service health check |
+| GET | `/api/v1/wells` | List of active wells as of a given date |
+| GET | `/api/v1/forecast` | Production forecast for a well over a date range |
+| GET | `/api/v1/model` | Current production model metadata and training provenance |
+
+#### `GET /api/v1/wells`
+
+Returns distinct wells that have production records on or before `date_query`.
+
+```bash
+curl "http://localhost:8000/api/v1/wells?date_query=2024-01-01"
+```
+
+```json
+[
+  {"id_well": "30000000003011"},
+  {"id_well": "30000000003012"}
+]
+```
+
+#### `GET /api/v1/forecast`
+
+Returns the predicted monthly oil production (`prod_pet`) for a well between `date_start` and `date_end`. Features are sourced from the well's online store record (the pre-computed row for the next inference period).
+
+```bash
+curl "http://localhost:8000/api/v1/forecast?id_well=30000000003011&date_start=2024-01-01&date_end=2024-06-01"
+```
+
+```json
+{
+  "id_well": "30000000003011",
+  "data": [
+    {"date": "2024-01-01", "prod": 142.7},
+    {"date": "2024-02-01", "prod": 142.7},
+    {"date": "2024-03-01", "prod": 142.7}
+  ]
+}
+```
+
+#### `GET /api/v1/model`
+
+Returns metadata of the current production model for traceability: which feature store version was used for training, the MLflow run ID, hyperparameters, and evaluation metrics.
+
+```bash
+curl "http://localhost:8000/api/v1/model"
+```
+
+```json
+{
+  "model_name": "rf_prod_pet",
+  "model_version": "3",
+  "alias": "production",
+  "run_id": "a1b2c3d4e5f6...",
+  "feature_store_version": "v2",
+  "feature_store_table": "v2_feature_store",
+  "target": "prod_pet",
+  "n_estimators": 100,
+  "metrics": {
+    "mae": 12.4,
+    "mse": 430.1,
+    "r2": 0.87
+  }
+}
 ```
 
 ### Rerunning the pipeline

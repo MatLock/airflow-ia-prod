@@ -386,6 +386,8 @@ services:
     environment:
       MLFLOW_TRACKING_URI: 'http://mlflow:9090'
       MYSQL_HOST: mysql
+    volumes:
+      - ./mlruns:/mlflow/mlruns
     depends_on:
       mysql:
         condition: service_healthy

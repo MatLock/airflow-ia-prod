@@ -19,7 +19,7 @@ MYSQL_CONN_STRING = (
     f"mysql+pymysql://{os.environ['MYSQL_USER']}:{os.environ['MYSQL_PASSWORD']}"
     f"@{os.environ['MYSQL_HOST']}:{os.environ['MYSQL_PORT']}/{os.environ['MYSQL_DATABASE']}"
 )
-GET_LATEST_FS_VERSION = "SELECT latest_feature_store_preffix FROM fs_metadata"
+DB_ENGINE = create_engine(MYSQL_CONN_STRING)
 MODEL_NAME = "rf_prod_pet"
 MODEL_ALIAS = "production"
 FEATURE_COLS = [
@@ -71,64 +71,39 @@ app = FastAPI(
     description="API para consultar el listado de pozos y sus pronósticos de producción.",
 )
 
-_engine = None
-_model = None
-_model_metadata: Optional[Dict[str, Any]] = None
-
-
-def get_engine():
-    global _engine
-    if _engine is None:
-        _engine = create_engine(MYSQL_CONN_STRING)
-    return _engine
-
 
 def get_model():
     """Load the production model and its metadata from MLflow on first call and cache both."""
-    global _model, _model_metadata
-    if _model is None:
-        logger.info(f"Loading model models:/{MODEL_NAME}@{MODEL_ALIAS} from MLflow...")
-        try:
-            client = MlflowClient()
-            mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
-            run = client.get_run(mv.run_id)
+    logger.info(f"Loading model models:/{MODEL_NAME}@{MODEL_ALIAS} from MLflow...")
+    try:
+        client = MlflowClient()
+        mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+        run = client.get_run(mv.run_id)
 
-            _model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
-            _model_metadata = {
-                "model_name": MODEL_NAME,
-                "model_version": mv.version,
-                "alias": MODEL_ALIAS,
-                "run_id": mv.run_id,
-                "feature_store_version": run.data.params.get("feature_store_version"),
-                "feature_store_table": run.data.params.get("feature_store_table"),
-                "target": run.data.params.get("target"),
-                "n_estimators": int(run.data.params.get("n_estimators", 0)),
-                "metrics": {
-                    "mae": run.data.metrics.get("mae"),
-                    "mse": run.data.metrics.get("mse"),
-                    "r2": run.data.metrics.get("r2"),
-                },
-            }
-            logger.info(f"Model loaded: version={mv.version} run_id={mv.run_id}")
-        except Exception as exc:
-            logger.error(f"Failed to load model: {exc}")
-            raise HTTPException(
-                status_code=503,
-                detail=f"Model not available. Make sure the training pipeline has run: {exc}",
-            )
-    return _model
-
-
-def get_latest_fs_table() -> str:
-    engine = get_engine()
-    with engine.connect() as conn:
-        result = conn.execute(text(GET_LATEST_FS_VERSION)).fetchone()
-    if result is None:
+        _model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
+        _model_metadata = {
+            "model_name": MODEL_NAME,
+            "model_version": mv.version,
+            "alias": MODEL_ALIAS,
+            "run_id": mv.run_id,
+            "feature_store_version": run.data.params.get("feature_store_version"),
+            "feature_store_table": run.data.params.get("feature_store_table"),
+            "target": run.data.params.get("target"),
+            "n_estimators": int(run.data.params.get("n_estimators", 0)),
+            "metrics": {
+                "mae": run.data.metrics.get("mae"),
+                "mse": run.data.metrics.get("mse"),
+                "r2": run.data.metrics.get("r2"),
+            },
+        }
+        logger.info(f"Model loaded: version={mv.version} run_id={mv.run_id}")
+    except Exception as exc:
+        logger.error(f"Failed to load model: {exc}")
         raise HTTPException(
             status_code=503,
-            detail="Feature store not initialized. Run the ingest DAG first.",
+            detail=f"Model not available. Make sure the training pipeline has run: {exc}",
         )
-    return f"{result[0]}_feature_store"
+    return _model, _model_metadata
 
 
 # Endpoints
@@ -145,19 +120,19 @@ def get_model_metadata():
     Exposes which feature store version was used for training, the MLflow run ID
     for full reproducibility, and the evaluation metrics that determined promotion.
     """
-    get_model()  # ensures _model_metadata is populated
-    if _model_metadata is None:
+    production_ml_model, production_ml_model_metadata =  get_model()
+    if production_ml_model is None:
         raise HTTPException(status_code=503, detail="Model metadata not available")
     return ModelMetadataResponse(
-        model_name=_model_metadata["model_name"],
-        model_version=str(_model_metadata["model_version"]),
-        alias=_model_metadata["alias"],
-        run_id=_model_metadata["run_id"],
-        feature_store_version=_model_metadata.get("feature_store_version"),
-        feature_store_table=_model_metadata.get("feature_store_table"),
-        target=_model_metadata.get("target"),
-        n_estimators=_model_metadata.get("n_estimators"),
-        metrics=ModelMetrics(**_model_metadata["metrics"]),
+        model_name=production_ml_model_metadata["model_name"],
+        model_version=str(production_ml_model_metadata["model_version"]),
+        alias=production_ml_model_metadata["alias"],
+        run_id=production_ml_model_metadata["run_id"],
+        feature_store_version=production_ml_model_metadata["feature_store_version"],
+        feature_store_table=production_ml_model_metadata["feature_store_table"],
+        target=production_ml_model_metadata["target"],
+        n_estimators=production_ml_model_metadata["n_estimators"],
+        metrics=ModelMetrics(**production_ml_model_metadata["metrics"]),
     )
 
 
@@ -166,13 +141,13 @@ def get_wells(
     date_query: date = Query(..., description="Fecha para la cual se hace la consulta (YYYY-MM-DD)"),
 ):
     """Return distinct wells that have production records on or before date_query."""
-    table_name = get_latest_fs_table()
-    engine = get_engine()
+    _, production_ml_model_metadata = get_model()
+    table_name = production_ml_model_metadata["feature_store_table"]
 
     query = text(
         f"SELECT DISTINCT idpozo FROM `{table_name}` WHERE DATE(fecha) <= :date_query"
     )
-    with engine.connect() as conn:
+    with DB_ENGINE.connect() as conn:
         rows = conn.execute(query, {"date_query": date_query}).fetchall()
 
     return [{"id_well": str(row[0])} for row in rows]
@@ -195,9 +170,8 @@ def get_forecast(
     if date_start > date_end:
         raise HTTPException(status_code=400, detail="date_start must be <= date_end")
 
-    model = get_model()
-    table_name = get_latest_fs_table()
-    engine = get_engine()
+    production_ml_model, production_ml_model_metadata =  get_model()
+    table_name = production_ml_model_metadata["feature_store_table"]
 
     cols = ", ".join(FEATURE_COLS)
 
@@ -206,11 +180,11 @@ def get_forecast(
         "WHERE idpozo = :well_id AND prod_pet IS NULL "
         "ORDER BY fecha DESC LIMIT 1"
     )
-    # Fall back to the most recent historical record
+    # Fall back to the most recent 10 historical records
     query_hist = text(
         f"SELECT {cols} FROM `{table_name}` "
         "WHERE idpozo = :well_id AND prod_pet IS NOT NULL "
-        "ORDER BY fecha DESC LIMIT 1"
+        "ORDER BY fecha DESC LIMIT 10"
     )
 
     try:
@@ -218,23 +192,43 @@ def get_forecast(
     except ValueError:
         well_id_param = id_well
 
-    with engine.connect() as conn:
+    with DB_ENGINE.connect() as conn:
         row = conn.execute(query_online, {"well_id": well_id_param}).fetchone()
         if row is None:
-            row = conn.execute(query_hist, {"well_id": well_id_param}).fetchone()
+            hist_rows = conn.execute(query_hist, {"well_id": well_id_param}).fetchall()
+        else:
+            hist_rows = None
 
-    if row is None:
+    if row is None and not hist_rows:
         raise HTTPException(status_code=404, detail=f"Well '{id_well}' not found in feature store")
 
-    features = pd.DataFrame([dict(zip(FEATURE_COLS, row))], columns=FEATURE_COLS)
-    pred_value = float(model.predict(features)[0])
+    if row is not None:
+        # Online store row available
+        features = dict(zip(FEATURE_COLS, row))
+        recent_pet = [features["avg_prod_pet_10m"]] * 10
+    else:
+        # Use latest historical record as feature base, last 10 for rolling avg
+        features = dict(zip(FEATURE_COLS, hist_rows[0]))
+        recent_pet = [float(r[FEATURE_COLS.index("last_prod_pet")]) for r in reversed(hist_rows)]
+        while len(recent_pet) < 10:
+            recent_pet.insert(0, recent_pet[0])
+        features["avg_prod_pet_10m"] = sum(recent_pet) / len(recent_pet)
 
-    # Build one data point per calendar month in [date_start, date_end]
     data: List[ForecastPoint] = []
     current = date(date_start.year, date_start.month, 1)
     end_month = date(date_end.year, date_end.month, 1)
     while current <= end_month:
+        df = pd.DataFrame([features], columns=FEATURE_COLS)
+        pred_value = float(production_ml_model.predict(df)[0])
         data.append(ForecastPoint(date=current, prod=pred_value))
+
+        # Feed prediction back into features for next month
+        recent_pet.append(pred_value)
+        recent_pet.pop(0)
+        features["last_prod_pet"] = pred_value
+        features["avg_prod_pet_10m"] = sum(recent_pet) / len(recent_pet)
+        features["n_readings"] = features["n_readings"] + 1
+
         if current.month == 12:
             current = date(current.year + 1, 1, 1)
         else:

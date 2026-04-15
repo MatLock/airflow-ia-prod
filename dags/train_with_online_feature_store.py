@@ -61,8 +61,8 @@ def train_with_online_feature_store():
 
       mlflow.log_param("target", TARGET)
       mlflow.log_param("n_estimators", n_estimators)
-      mlflow.log_param("feature_store_version", fs_version)
-      mlflow.log_param("feature_store_table", table_name)
+      mlflow.set_tag("feature_store_version", fs_version)
+      mlflow.set_tag("feature_store_table", table_name)
       mlflow.log_metric("mae", mae)
       mlflow.log_metric("mse", mse)
       mlflow.log_metric("r2", r2)

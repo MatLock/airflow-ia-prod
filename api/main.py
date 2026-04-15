@@ -81,13 +81,14 @@ def get_model():
         run = client.get_run(mv.run_id)
 
         _model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
+        logger.info(f"Run tags: {run.data.tags}")
         _model_metadata = {
             "model_name": MODEL_NAME,
             "model_version": mv.version,
             "alias": MODEL_ALIAS,
             "run_id": mv.run_id,
-            "feature_store_version": run.data.params.get("feature_store_version"),
-            "feature_store_table": run.data.params.get("feature_store_table"),
+            "feature_store_version": run.data.tags.get("feature_store_version"),
+            "feature_store_table": run.data.tags.get("feature_store_table"),
             "target": run.data.params.get("target"),
             "n_estimators": int(run.data.params.get("n_estimators", 0)),
             "metrics": {
